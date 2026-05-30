@@ -13,6 +13,7 @@ import openpyxl
 from openpyxl.styles import Alignment, Font, PatternFill
 
 from calculator import calculate_srim
+from scorer import compute_scores
 from dart_api import (
     get_consensus_target_price, get_current_price, get_financial_data,
     get_quarterly_income, get_share_count, search_corp,
@@ -357,6 +358,17 @@ with st.sidebar:
     )
 
     st.divider()
+
+    # ── 전체스캔 정렬 ─────────────────────────────────────────────────────────
+    st.subheader("↕️ 정렬 기준")
+    st.radio(
+        "정렬 기준",
+        ["종합점수순", "저평가순(비율)"],
+        key="scan_sort_by",
+        label_visibility="collapsed",
+    )
+
+    st.divider()
     st.link_button(
         "📊 한국신용평가 등급별 금리",
         "https://www.kisrating.com/ratingsStatistics/statics_spread.do",
@@ -536,23 +548,33 @@ with tab_scan:
     if not scan_data:
         st.stop()
 
+    # 스코어 필드가 없는 기존 데이터 자동 재계산 (파일 덮어쓰기 없음)
+    for item in scan_data:
+        if "total_score" not in item:
+            item.update(compute_scores(item))
+
+    # 점수 계산 방식 설명
+    with st.expander("ℹ️ 점수 계산 방식"):
+        st.markdown(
+            """
+**종합점수 = 밸류×35% + 퀄리티×35% + 모멘텀×20% + 규모×10%**
+
+| 팩터 | 가중치 | 기준 |
+|------|--------|------|
+| **밸류** | 35% | 종가/적정주가(ratio_basic) — 0.3이하→100점, 0.8이상→0점, 선형보간. low_roe 종목→0점 |
+| **퀄리티** | 35% | ROE점수(5%→0, 25%→100) + 부채비율점수(200%→0, 0%→100, 없으면50) + ROE일관성(차이0→100, ≥10%→0) 평균 |
+| **모멘텀** | 20% | 6개월 수익률(-20%→0, +40%→100) + 12개월 수익률(-30%→0, +60%→100) 평균. 데이터 없으면 50점(중립) |
+| **규모** | 10% | 시가총액 5,000억→0점, 10조→100점 선형 |
+            """
+        )
+
     # 사이드바 필터값 읽기
     req_ret_filter = st.session_state.get("scan_req_ret", 5.0)
     ratio_max = st.session_state.get("scan_ratio_max", 0.8)
     min_cap_eok = st.session_state.get("scan_min_cap", 5000)
-    w_filter = st.session_state.get("scan_w", 0.2)
+    sort_by = st.session_state.get("scan_sort_by", "종합점수순")
 
     min_cap_won = min_cap_eok * 1e8
-
-    # w값이 변경된 경우 적정주가 재계산
-    def recompute_fair(item: dict, w: float, req_ret: float) -> dict:
-        try:
-            calc = calculate_srim(item["equity"], item["net_income"],
-                                  None, req_ret, w)
-        except Exception:
-            return item
-        # shares 없으면 원본 fair_basic 비율 유지
-        return item
 
     # 필터링
     filtered = []
@@ -571,11 +593,15 @@ with tab_scan:
         filtered.append(item)
 
     # 정렬
-    filtered.sort(key=lambda x: x.get("ratio_basic") or 999)
+    if sort_by == "종합점수순":
+        filtered.sort(key=lambda x: x.get("total_score", 0), reverse=True)
+    else:
+        filtered.sort(key=lambda x: x.get("ratio_basic") or 999)
 
     st.subheader(f"📋 스크리너 결과 — {len(filtered)}개 종목")
     st.caption(
-        f"필터: ROE > {req_ret_filter}%  |  종가/적정주가 < {ratio_max}  |  시가총액 ≥ {min_cap_eok:,}억원"
+        f"필터: ROE > {req_ret_filter}%  |  종가/적정주가 < {ratio_max}  |  "
+        f"시가총액 ≥ {min_cap_eok:,}억원  |  정렬: {sort_by}"
     )
 
     if not filtered:
@@ -586,23 +612,37 @@ with tab_scan:
             cap_eok = item["market_cap"] / 1e8
             dr = item.get("debt_ratio")
             r3 = item.get("roe_3yr_avg")
-            warn = "⚠️ 경기민감 업종" if item.get("cyclical_warning") else ""
+            warn = "⚠️" if item.get("cyclical_warning") else ""
             rows.append({
                 "순위": rank,
                 "경고": warn,
                 "종목명": item["name"],
+                "종합점수": f"{item['total_score']:.1f}" if item.get("total_score") is not None else "-",
+                "밸류": f"{item['value_score']:.1f}" if item.get("value_score") is not None else "-",
+                "퀄리티": f"{item['quality_score']:.1f}" if item.get("quality_score") is not None else "-",
+                "모멘텀": f"{item['momentum_score']:.1f}" if item.get("momentum_score") is not None else "-",
                 "업종": item.get("sector", ""),
                 "시가총액(억원)": f"{cap_eok:,.0f}",
                 "ROE(%)": f"{item['roe']:.2f}",
                 "3yr ROE(%)": f"{r3:.2f}" if r3 is not None else "-",
                 "부채비율(%)": f"{dr:.0f}" if dr is not None else "-",
                 "적정주가_기본": f"{item['fair_basic']:,.0f}",
-                "적정주가_보수적": f"{item['fair_w']:,.0f}",
                 "현재주가": f"{item['current_price']:,.0f}",
                 "종가/적정주가": f"{item['ratio_basic']:.3f}",
             })
 
         df = pd.DataFrame(rows)
+
+        def _color_score(val):
+            try:
+                v = float(val)
+            except (ValueError, TypeError):
+                return ""
+            t = max(0.0, min(1.0, v / 100.0))
+            r = int(220 - t * 180)
+            g = int(53 + t * 114)
+            b = int(69 - t * 69)
+            return f"background-color: rgb({r},{g},{b}); color: white;"
 
         def _color_ratio(val):
             try:
@@ -623,6 +663,7 @@ with tab_scan:
 
         styled = (
             df.style
+            .applymap(_color_score, subset=["종합점수", "밸류", "퀄리티", "모멘텀"])
             .applymap(_color_ratio, subset=["종가/적정주가"])
             .applymap(_color_warn, subset=["경고"])
         )
@@ -634,6 +675,13 @@ with tab_scan:
                 "순위": rank,
                 "종목코드": item["ticker"],
                 "종목명": item["name"],
+                "종합점수": item.get("total_score"),
+                "밸류점수": item.get("value_score"),
+                "퀄리티점수": item.get("quality_score"),
+                "모멘텀점수": item.get("momentum_score"),
+                "규모점수": item.get("size_score"),
+                "6개월수익률(%)": item.get("mom_6m"),
+                "12개월수익률(%)": item.get("mom_12m"),
                 "업종": item.get("sector", ""),
                 "경기민감": "⚠️" if item.get("cyclical_warning") else "",
                 "시가총액(억원)": round(item["market_cap"] / 1e8, 0),
