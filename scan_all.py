@@ -19,7 +19,6 @@ from dotenv import load_dotenv
 
 import FinanceDataReader as fdr
 import pandas as pd
-from pykrx import stock as pykrx_stock
 
 from calculator import calculate_srim
 from scorer import compute_scores
@@ -259,33 +258,51 @@ def get_share_count(corp_code: str, year: str) -> int | None:
 
 # ─── 모멘텀 수집 ─────────────────────────────────────────────────────────────
 
-def get_momentum_map() -> dict:
-    """전종목 6개월/12개월 수익률을 한번에 수집. {ticker: {mom_6m, mom_12m}}"""
-    try:
-        today = datetime.now()
-        d6m  = (today - timedelta(days=183)).strftime("%Y%m%d")
-        d12m = (today - timedelta(days=365)).strftime("%Y%m%d")
-        today_str = today.strftime("%Y%m%d")
+def get_momentum_map(tickers: list[str]) -> dict:
+    """
+    FDR로 종목별 6개월/12개월 수익률 수집.
+    {ticker: {mom_6m, mom_12m}}
+    """
+    today = datetime.now()
+    start = (today - timedelta(days=370)).strftime("%Y-%m-%d")
+    end   = today.strftime("%Y-%m-%d")
+    d6m   = (today - timedelta(days=183)).strftime("%Y-%m-%d")
+    d12m  = (today - timedelta(days=365)).strftime("%Y-%m-%d")
 
-        print("pykrx 모멘텀 데이터 수집 중...")
-        close_today = pykrx_stock.get_market_ohlcv_by_ticker(today_str, market="KOSPI")["종가"]
-        close_6m    = pykrx_stock.get_market_ohlcv_by_ticker(d6m,       market="KOSPI")["종가"]
-        close_12m   = pykrx_stock.get_market_ohlcv_by_ticker(d12m,      market="KOSPI")["종가"]
+    result = {}
+    ok = 0
+    print(f"FDR 모멘텀 데이터 수집 중 ({len(tickers)}개)...")
+    for ticker in tickers:
+        try:
+            df = fdr.DataReader(ticker, start, end)
+            if df is None or df.empty:
+                result[ticker] = {"mom_6m": None, "mom_12m": None}
+                continue
 
-        result = {}
-        for ticker in close_today.index:
-            p_now = close_today.get(ticker)
-            p6    = close_6m.get(ticker)
-            p12   = close_12m.get(ticker)
-            result[str(ticker).zfill(6)] = {
+            p_now = float(df["Close"].iloc[-1])
+
+            def _closest_close(target: str) -> float | None:
+                idx = df.index.searchsorted(target)
+                if idx >= len(df):
+                    idx = len(df) - 1
+                if idx < 0:
+                    return None
+                return float(df["Close"].iloc[idx])
+
+            p6  = _closest_close(d6m)
+            p12 = _closest_close(d12m)
+
+            result[ticker] = {
                 "mom_6m":  round((p_now / p6  - 1) * 100, 2) if p6  and p6  > 0 else None,
                 "mom_12m": round((p_now / p12 - 1) * 100, 2) if p12 and p12 > 0 else None,
             }
-        print(f"  → {len(result)}개 종목 모멘텀 수집 완료")
-        return result
-    except Exception as e:
-        print(f"  모멘텀 수집 실패: {e} — 모멘텀 없이 진행")
-        return {}
+            ok += 1
+        except Exception:
+            result[ticker] = {"mom_6m": None, "mom_12m": None}
+        time.sleep(0.1)
+
+    print(f"  → {ok}/{len(tickers)}개 모멘텀 수집 완료")
+    return result
 
 
 # ─── 코스피 종목 필터링 ────────────────────────────────────────────────────────
@@ -358,7 +375,7 @@ def scan_all():
     sector_map           = _get_kind_sector_map()
     tickers, phase1_cnt  = get_kospi_tickers_filtered(sector_map)
     stock_map            = _get_stock_code_map()
-    momentum_map         = get_momentum_map()
+    momentum_map         = get_momentum_map([s["ticker"] for s in tickers])
 
     total = len(tickers)
     results = []
