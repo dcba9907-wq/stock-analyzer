@@ -1,0 +1,10 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+.corp_codes_cache.json
+history.json
+scan_results.json
+scan_errors.json
+*.xlsx
+.DS_Store
