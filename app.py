@@ -14,6 +14,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 
 from calculator import calculate_srim
 from scorer import compute_scores
+from universe_snapshot import list_snapshots, load_snapshot, compare_universes
 from dart_api import (
     get_consensus_target_price, get_current_price, get_financial_data,
     get_quarterly_income, get_share_count, search_corp,
@@ -384,7 +385,7 @@ if not os.getenv("DART_API_KEY"):
     st.error("⚠️ DART_API_KEY가 설정되지 않았습니다. .env 파일에 API 키를 추가하세요.")
     st.stop()
 
-tab_individual, tab_scan = st.tabs(["🔍 개별분석", "📡 전체스캔 결과"])
+tab_individual, tab_scan, tab_universe = st.tabs(["🔍 개별분석", "📡 전체스캔 결과", "📸 유니버스 히스토리"])
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -704,3 +705,88 @@ with tab_scan:
             file_name=f"scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 탭 3: 유니버스 히스토리
+# ═══════════════════════════════════════════════════════════════════════════════
+
+with tab_universe:
+    quarters = list_snapshots()
+
+    if not quarters:
+        st.info("저장된 유니버스 스냅샷이 없습니다. 스캔을 실행하면 자동으로 저장됩니다.")
+        st.stop()
+
+    # ── 분기별 스냅샷 목록 ────────────────────────────────────────────────────
+    st.subheader("📋 분기별 유니버스 현황")
+
+    summary_rows = []
+    for q in reversed(quarters):
+        data = load_snapshot(q)
+        if not data:
+            continue
+        for scan in data["scans"]:
+            summary_rows.append({
+                "분기": q.replace("_", " "),
+                "스캔일시": scan["scan_dt"],
+                "유니버스 종목수": scan["ticker_count"],
+            })
+
+    st.dataframe(pd.DataFrame(summary_rows), hide_index=True, use_container_width=True)
+
+    st.divider()
+
+    # ── 분기 비교 ─────────────────────────────────────────────────────────────
+    st.subheader("🔍 분기 유니버스 비교")
+
+    if len(quarters) < 2:
+        st.info("분기가 2개 이상 쌓이면 비교 가능합니다. 다음 분기 스캔 후 다시 확인하세요.")
+    else:
+        col1, col2 = st.columns(2)
+        with col1:
+            q_old = st.selectbox("기준 분기 (이전)", quarters, index=0, key="q_old")
+        with col2:
+            q_new = st.selectbox("비교 분기 (이후)", quarters, index=len(quarters) - 1, key="q_new")
+
+        if q_old == q_new:
+            st.warning("서로 다른 분기를 선택하세요.")
+        else:
+            result = compare_universes(q_old, q_new)
+            added     = result["added"]
+            removed   = result["removed"]
+            maintained = result["maintained"]
+
+            m1, m2, m3 = st.columns(3)
+            m1.metric("✅ 유지", len(maintained))
+            m2.metric("🆕 신규 편입", len(added))
+            m3.metric("❌ 제외 (생존편향 대상)", len(removed))
+
+            if removed:
+                st.subheader("❌ 제외된 종목 (상장폐지·조건미달)")
+                st.caption("이 종목들이 분석에서 사라진 이유를 확인하세요 — 생존편향의 원인이 됩니다.")
+                removed_df = pd.DataFrame(removed).rename(
+                    columns={"ticker": "종목코드", "name": "종목명"}
+                )
+                st.dataframe(
+                    removed_df.style.applymap(
+                        lambda _: "background-color: #fde8e8; color: #721c24;",
+                        subset=["종목명"],
+                    ),
+                    hide_index=True,
+                    use_container_width=True,
+                )
+
+            if added:
+                st.subheader("🆕 신규 편입 종목")
+                added_df = pd.DataFrame(added).rename(
+                    columns={"ticker": "종목코드", "name": "종목명"}
+                )
+                st.dataframe(
+                    added_df.style.applymap(
+                        lambda _: "background-color: #d4edda; color: #155724;",
+                        subset=["종목명"],
+                    ),
+                    hide_index=True,
+                    use_container_width=True,
+                )

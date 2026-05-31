@@ -22,6 +22,7 @@ import pandas as pd
 
 from calculator import calculate_srim
 from scorer import compute_scores
+from universe_snapshot import save_snapshot
 
 load_dotenv()
 
@@ -374,6 +375,7 @@ def scan_all():
 
     sector_map           = _get_kind_sector_map()
     tickers, phase1_cnt  = get_kospi_tickers_filtered(sector_map)
+    saved_quarter        = save_snapshot(tickers, scan_dt)
     stock_map            = _get_stock_code_map()
     momentum_map         = get_momentum_map([s["ticker"] for s in tickers])
 
@@ -549,6 +551,7 @@ def scan_all():
     print(f"{'='*60}")
     print(f"  결과: {RESULTS_FILE}")
     print(f"  오류: {ERRORS_FILE}")
+    print(f"  스냅샷: universe_snapshots/{saved_quarter}.json (유니버스 {len(tickers)}개)")
     print(f"{'='*60}")
     print("""
 매일 자동실행 설정방법:
