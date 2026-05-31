@@ -15,6 +15,9 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from calculator import calculate_srim
 from scorer import compute_scores
 from universe_snapshot import list_snapshots, load_snapshot, compare_universes
+from watchlist import (
+    load_watchlist, add_to_watchlist, remove_from_watchlist, is_in_watchlist,
+)
 from dart_api import (
     get_consensus_target_price, get_current_price, get_financial_data,
     get_quarterly_income, get_share_count, search_corp,
@@ -385,7 +388,9 @@ if not os.getenv("DART_API_KEY"):
     st.error("⚠️ DART_API_KEY가 설정되지 않았습니다. .env 파일에 API 키를 추가하세요.")
     st.stop()
 
-tab_individual, tab_scan, tab_universe = st.tabs(["🔍 개별분석", "📡 전체스캔 결과", "📸 유니버스 히스토리"])
+tab_individual, tab_scan, tab_universe, tab_watchlist = st.tabs(
+    ["🔍 개별분석", "📡 전체스캔 결과", "📸 유니버스 히스토리", "⭐ 관심종목"]
+)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -670,6 +675,28 @@ with tab_scan:
         )
         st.dataframe(styled, use_container_width=True, hide_index=True)
 
+        # ── ★ 찜하기 버튼 그리드 ─────────────────────────────────────────────
+        st.caption("★ 관심종목 등록/해제 — 버튼을 클릭하세요")
+        cols_per_row = 6
+        for chunk_start in range(0, len(filtered), cols_per_row):
+            chunk = filtered[chunk_start: chunk_start + cols_per_row]
+            btn_cols = st.columns(cols_per_row)
+            for col, item in zip(btn_cols, chunk):
+                ticker = item["ticker"]
+                in_wl = is_in_watchlist(ticker)
+                label = f"★ {item['name']}" if in_wl else f"☆ {item['name']}"
+                if col.button(label, key=f"watch_{ticker}", use_container_width=True):
+                    if in_wl:
+                        remove_from_watchlist(ticker)
+                    else:
+                        add_to_watchlist(
+                            ticker, item["name"],
+                            item["current_price"],
+                            item.get("total_score"),
+                            item.get("ratio_basic"),
+                        )
+                    st.rerun()
+
         st.divider()
         export_df = pd.DataFrame([
             {
@@ -790,3 +817,104 @@ with tab_universe:
                     hide_index=True,
                     use_container_width=True,
                 )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 탭 4: 관심종목
+# ═══════════════════════════════════════════════════════════════════════════════
+
+with tab_watchlist:
+    wl_items = load_watchlist()
+
+    if not wl_items:
+        st.info("탭2 스캔 결과에서 ☆ 버튼으로 관심종목을 등록하세요.")
+        st.stop()
+
+    # scan_results를 ticker 기준 dict로
+    scan_map = {item["ticker"]: item for item in load_scan_results()}
+
+    # ── 상단 메트릭 ───────────────────────────────────────────────────────────
+    price_changes = []
+    current_scores = []
+    for w in wl_items:
+        cur = scan_map.get(w["ticker"])
+        if cur and w.get("added_price"):
+            chg = (cur["current_price"] - w["added_price"]) / w["added_price"] * 100
+            price_changes.append(chg)
+        if cur and cur.get("total_score") is not None:
+            current_scores.append(cur["total_score"])
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("⭐ 관심종목", f"{len(wl_items)}개")
+    m2.metric(
+        "평균 주가 변화",
+        f"{sum(price_changes)/len(price_changes):.1f}%" if price_changes else "-",
+    )
+    m3.metric(
+        "평균 현재 종합점수",
+        f"{sum(current_scores)/len(current_scores):.1f}점" if current_scores else "-",
+    )
+
+    st.divider()
+    st.subheader("📋 관심종목 현황")
+
+    # ── 행별 표시 + 제거 버튼 ─────────────────────────────────────────────────
+    for w in list(wl_items):
+        ticker = w["ticker"]
+        cur = scan_map.get(ticker)
+
+        col_info, col_remove = st.columns([14, 1])
+
+        with col_info:
+            if cur is None:
+                # 스캔 외 종목 (상장폐지/조건미달)
+                st.warning(
+                    f"⚠️ **{w['name']}** ({ticker}) — 최신 스캔에 없는 종목 "
+                    f"(상장폐지·조건미달 가능성, 생존편향 주의)  |  "
+                    f"등록일: {w['added_dt']}  |  등록시 주가: {w['added_price']:,}원"
+                )
+            else:
+                added_price = w.get("added_price") or 0
+                cur_price   = cur["current_price"]
+                price_chg   = (cur_price - added_price) / added_price * 100 if added_price else None
+
+                added_score = w.get("added_score")
+                cur_score   = cur.get("total_score")
+                score_chg   = (cur_score - added_score) if (cur_score is not None and added_score is not None) else None
+
+                added_ratio = w.get("added_ratio")
+                cur_ratio   = cur.get("ratio_basic")
+
+                def _pct(v, dec=1):
+                    if v is None:
+                        return "-"
+                    color = "green" if v >= 0 else "red"
+                    sign  = "+" if v >= 0 else ""
+                    return f":{color}[**{sign}{v:.{dec}f}%**]"
+
+                def _pt(v):
+                    if v is None:
+                        return "-"
+                    color = "green" if v >= 0 else "red"
+                    sign  = "+" if v >= 0 else ""
+                    return f":{color}[**{sign}{v:.1f}pt**]"
+
+                price_chg_str = _pct(price_chg)
+                score_chg_str = _pt(score_chg)
+
+                st.markdown(
+                    f"**⭐ {w['name']}** ({ticker})  |  "
+                    f"등록: {w['added_dt'][:10]}  \n"
+                    f"주가: {added_price:,}원 → **{cur_price:,}원** ({price_chg_str})  |  "
+                    f"점수: {added_score if added_score is not None else '-'} → "
+                    f"**{cur_score if cur_score is not None else '-'}** ({score_chg_str})  |  "
+                    f"비율: {added_ratio:.3f if added_ratio else '-'} → "
+                    f"**{f'{cur_ratio:.3f}' if cur_ratio is not None else '-'}**"
+                )
+
+        with col_remove:
+            if st.button("✕", key=f"remove_{ticker}", help=f"{w['name']} 제거"):
+                remove_from_watchlist(ticker)
+                st.rerun()
+
+        st.divider()
